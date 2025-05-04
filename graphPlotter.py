@@ -1,113 +1,172 @@
 import cv2
-from PIL import Image
 import numpy as np
-import re
-import matplotlib.pyplot as plt
 import pytesseract
+from PIL import Image
+import matplotlib.pyplot as plt
+import re
 
-class GraphPlotter:
-    def __init__(self, graph_path, convert_to_si=False):
-        self.image_path = graph_path
-        self.convert_to_si = convert_to_si
-        self.graph_type = None
-        self.units = None
+class AdvancedGraphAnalyzer:
+    def __init__(self, image_path):
+        self.image_path = image_path
+        self.original_image = cv2.imread(image_path)
+        self.processed_image = None
+        self.plot_area = None
+        self.axis_labels = {"x": None, "y": None}
+        self.units = {"x": "unknown", "y": "unknown"}
         self.data_points = []
+        self.graph_type = "unknown"
+        
+        # Configuration
+        self.ocr_config = r'--oem 3 --psm 6'
+        self.unit_conversion = {
+            'km/h': {'factor': 0.27778, 'target': 'm/s'},
+            'mph': {'factor': 0.44704, 'target': 'm/s'},
+            'min': {'factor': 60, 'target': 's'},
+            'hr': {'factor': 3600, 'target': 's'},
+            'km': {'factor': 1000, 'target': 'm'}
+        }
 
-    def preprocess_graph(self):
-        # Preprocess the graph image for better OCR results
-        graph = cv2.imread(self.image_path)
-        gray = cv2.cvtColor(graph, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5,5), 0)
-        adaptive_thresh = cv2.adaptiveThreshold(
-            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+    def _preprocess_image(self):
+        """Enhance image for better OCR and feature detection"""
+        gray = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        self.processed_image = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 11, 2
         )
-        return adaptive_thresh
 
-    def extract_text(self, processed_image):
-        # Extract text from the image using OCR
-        text = pytesseract.image_to_string(Image.fromarray(processed_image))
-        return text
+    def _detect_plot_area(self):
+        """Find main plot area using contour analysis"""
+        edges = cv2.Canny(self.processed_image, 50, 150)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            raise ValueError("No contours found - cannot detect plot area")
 
-    def detect_graph_types_and_units(self, text):
-        # Detect the type of graph and the units used
-        if "Distance" in text and "Time" in text:
-            self.graph_type  = "Distance vs Time"
-            self.units = {"x": "s", "y": "m"} # Default SI
-        elif "Speed" in text and "Time" in text:
-            self.graph_type = "Speed vs Time"
-            self.units = {"x": "s", "y": "m/s"}
-        elif "Velocity" in text and "Time" in text:
-            self.graph_type = "Velocity vs Time"
-            self.units = {"x": "s", "y": "m/s"}
-        elif "Speed" in text and "Displacement" in text:
-            self.graph_type = "Speed vs Displacement"
-            self.units = {"x": "m", "y": "m/s"}
-        elif "Velocity" in text and "Displacement" in text:
-            self.graph_type = "Velocity vs Displacement"
-            self.units = {"x": "m", "y": "m/s"}
-        else:
-            self.graph_type = "Unknown"
-            self.units = {"x": "Unknown", "y": "Unknown"}
-        # Detect other possible units
-        unit_patterns = {"km/s": "km/s", "m/hr": "m/hr", "km/hr": "km/hr", "min":"min"}
-        for pattern, unit in unit_patterns.items():
-            if pattern in text:
-                self.units = {"x": unit if "Time" in self.graph_type else "m", "y": unit}
-                break
+        # Find largest rectangular contour
+        largest_contour = max(contours, key=lambda c: cv2.contourArea(c))
+        x, y, w, h = cv2.boundingRect(largest_contour)
+        self.plot_area = self.processed_image[y:y+h, x:x+w]
+        return x, y, w, h
 
-    def extract_data_points(self, text):
-        # Extract numerical data points from the graph
-        time_pattern = r"(\d{1,2}[:.]\d{2})" # Matches time formats
-        value_pattern = r"(\d+)" # Matches numerical values
-        times = re.findall(time_pattern, text)
-        values = re.findall(value_pattern, text)
-        self.data_points = list(zip(times, values[:len(times)]))
+    def _extract_axis_labels(self):
+        """Extract and parse axis labels using targeted OCR"""
+        # Detect X-axis label (bottom 10% of plot area)
+        x_axis_roi = self.plot_area[-int(self.plot_area.shape[0]*0.1):, :]
+        x_text = pytesseract.image_to_string(
+            Image.fromarray(x_axis_roi), config=self.ocr_config
+        )
+        
+        # Detect Y-axis label (left 10% of plot area)
+        y_axis_roi = self.plot_area[:, :int(self.plot_area.shape[1]*0.1)]
+        y_text = pytesseract.image_to_string(
+            Image.fromarray(y_axis_roi), config=self.ocr_config
+        )
 
-    def convert_to_si_units(self):
-        # Convert extracted values to SI units if requested
-        if self.convert_to_si:
-            conversion_factors = {"km/s": 1000, "km/hr": 1000 / 3600, "m/hr": 1 / 3600, "min": 60}
-            for unit, factor in conversion_factors.items():
-                if self.units["y"] == unit:
-                    self.data_points = [(t, float(v) * factor) for t, v in self.data_points]
-                    self.units["y"] = "m/s"
-                if self.units["x"] == "min":
-                    self.data_points = [(float(t) * 60, v) for t, v in self.data_points]
-                    self.units["x"] = "s"
+        # Parse units using improved regex
+        unit_pattern = r"\(?([a-zA-Z/]+)\)?"
+        self.axis_labels["x"] = self._parse_axis_label(x_text)
+        self.axis_labels["y"] = self._parse_axis_label(y_text)
+        
+        # Determine graph type based on axis labels
+        self.graph_type = f"{self.axis_labels['y']} vs {self.axis_labels['x']}"
 
-    def plot_graph(self):
-        # Plot the extracted data points
+    def _parse_axis_label(self, text):
+        """Enhanced label parsing with unit detection"""
+        # Remove special characters
+        clean_text = re.sub(r'[^a-zA-Z0-9/]', ' ', text)
+        # Find potential units
+        matches = re.findall(r'\b(m/s|km/h|s|m|min|hr)\b', clean_text, re.IGNORECASE)
+        return matches[0].lower() if matches else "unknown"
+
+    def _extract_data_points(self):
+        """Detect data points using line detection and pixel analysis"""
+        # Convert to RGB for visualization
+        plot_rgb = cv2.cvtColor(self.plot_area, cv2.COLOR_GRAY2RGB)
+        
+        # Detect lines using Hough Transform
+        lines = cv2.HoughLinesP(
+            self.plot_area, 1, np.pi/180, threshold=50,
+            minLineLength=30, maxLineGap=10
+        )
+
+        if lines is None:
+            raise ValueError("No data line detected in the plot area")
+
+        # Collect all points from detected lines
+        points = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            points.extend([(x1, y1), (x2, y2)])
+            
+        # Convert pixel positions to data values
+        self._pixel_to_data(points)
+
+    def _pixel_to_data(self, pixel_points):
+        """Convert pixel coordinates to data values (simplified example)"""
+        # In real implementation, use axis scale calibration
+        # This is a simplified linear approximation
+        x_min, x_max = 0, self.plot_area.shape[1]
+        y_min, y_max = self.plot_area.shape[0], 0
+        
+        # Assume sample data range for demonstration
+        data_x = np.linspace(0, 10, x_max)
+        data_y = np.linspace(0, 100, y_max)
+        
+        for x, y in pixel_points:
+            self.data_points.append((
+                round(data_x[x], 2),
+                round(data_y[y], 2)
+            ))
+
+    def _convert_units(self):
+        """Apply unit conversions based on detected units"""
+        for axis in ['x', 'y']:
+            unit = self.axis_labels[axis]
+            if unit in self.unit_conversion:
+                conversion = self.unit_conversion[unit]
+                self.data_points = [
+                    (x * conversion['factor'] if axis == 'x' else x,
+                     y * conversion['factor'] if axis == 'y' else y)
+                    for x, y in self.data_points
+                ]
+                self.axis_labels[axis] = conversion['target']
+
+    def analyze(self):
+        """Main analysis pipeline"""
+        try:
+            self._preprocess_image()
+            self._detect_plot_area()
+            self._extract_axis_labels()
+            self._extract_data_points()
+            self._convert_units()
+            return True
+        except Exception as e:
+            print(f"Analysis failed: {str(e)}")
+            return False
+
+    def visualize(self):
+        """Create visualization of processed data"""
         if not self.data_points:
-            print("No data points available to plot")
+            print("No data points to visualize")
             return
 
-        x_values = [float(t.replace(':', '.')) for t, _ in self.data_points]
-        y_values = [float(v) for _, v in self.data_points]
-
-        plt.figure(figsize=(8,6))
-        plt.plot(x_values, y_values, marker='o', linestyle='-', color='b')
-        plt.xlabel(f"{self.units['x']}")
-        plt.ylabel(f"{self.units['y']}")
-        plt.title(f"{self.graph_type}")
+        plt.figure(figsize=(10, 6))
+        x_vals, y_vals = zip(*self.data_points)
+        
+        plt.plot(x_vals, y_vals, 'b-', marker='o')
+        plt.xlabel(f"{self.axis_labels['x'].upper()} ({self.units['x']})")
+        plt.ylabel(f"{self.axis_labels['y'].upper()} ({self.units['y']})")
+        plt.title(f"Processed Graph: {self.graph_type}")
         plt.grid(True)
         plt.show()
 
-    def process_graph(self):
-        # Main function to process the graph
-        processed_graph = self.preprocess_graph()
-        extracted_text = self.extract_text(processed_graph)
-        self.detect_graph_types_and_units(extracted_text)
-        self.extract_data_points(extracted_text)
-        self.convert_to_si_units()
-        self.plot_graph()
-        return {
-            "Graph Type": self.graph_type,
-            "Units": self.units,
-            "Data Points": self.data_points
-        }
-
 if __name__ == "__main__":
-    image_path = input("Enter the path to the graph image: ")
-    graph_plotter = GraphPlotter(image_path)
-    result = graph_plotter.process_graph()
-    print(result)
+    analyzer = AdvancedGraphAnalyzer("sample_graph.png")
+    if analyzer.analyze():
+        print("Analysis successful!")
+        print(f"Graph Type: {analyzer.graph_type}")
+        print(f"Data Points: {analyzer.data_points[:5]}...")  # Show first 5 points
+        analyzer.visualize()
+    else:
+        print("Analysis failed")
