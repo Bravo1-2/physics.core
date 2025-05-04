@@ -1,51 +1,93 @@
 import re
 import json
-from typing import Dict, List
-from dataExtractor import read_markdown_file # Importing the function from dataExtractor.py
+import os
 
-def parse_markdown(md_content):
-    # Parses Markdown content into a structured JSON format
+def parse_markdown(md_content: str) -> dict:
+    """Parse markdown content into a structured JSON format."""
     structured_data = {"Chapters": []}
     current_chapter = None
     current_topic = None
+    current_subtopic = None
 
-    lines = md_content.split("\n")
-
-    for line in lines:
+    for line in md_content.split("\n"):
         line = line.strip()
 
-        if line.startswith("[Chapter]"):
-            current_chapter = {"title" : line.replace("[Chapter]", "").strip(), "topics": []}
+        # -------- Header Detection --------
+        # Chapter detection (e.g., "# [Chapter] Motion")
+        if re.match(r"^# \[Chapter\]", line):
+            current_chapter = {
+                "title": re.sub(r"^# \[Chapter\] ", "", line).strip(),
+                "topics": []
+            }
             structured_data["Chapters"].append(current_chapter)
+            current_topic = None
+            current_subtopic = None
 
-        elif line.startswith("[Topic]") and current_chapter is not None:
-            current_topic = {"title": line.replace("[Topic]", "").strip(), "content": []}
+        # Topic detection (e.g., "## [Topic] Introduction")
+        elif re.match(r"^## \[Topic\]", line) and current_chapter:
+            current_topic = {
+                "title": re.sub(r"^## \[Topic\] ", "", line).strip(),
+                "content": [],
+                "subtopics": []
+            }
             current_chapter["topics"].append(current_topic)
+            current_subtopic = None
 
-        elif any(tag in line for tag in ["[Definition]", "[Formula]", "[Example]"]) and current_topic is not None:
-            match = re.match(r"\[.*?]", line)
+        # Subtopic detection (e.g., "### [Subtopic] Distance")
+        elif re.match(r"^### \[Subtopic\]", line) and current_topic:
+            current_subtopic = {
+                "title": re.sub(r"^### \[Subtopic\] ", "", line).strip(),
+                "content": []
+            }
+            current_topic["subtopics"].append(current_subtopic)
+
+        # -------- Content Detection --------
+        # Bullet points (e.g., "- [Definition] ...")
+        elif line.startswith("- [") and (current_topic or current_subtopic):
+            match = re.match(r"- \[(.*?)\] (.*)", line)
             if match:
-                tag, content = match.groups()
-                current_topic["content"].append({"type": tag, "text": content.strip()})
+                entry = {
+                    "type": match.group(1).lower(),
+                    "text": match.group(2).strip()
+                }
+                if current_subtopic:
+                    current_subtopic["content"].append(entry)
+                else:
+                    current_topic["content"].append(entry)
 
-        elif line and current_topic is not None:
-            current_topic["content"].append({"type": "Text", "text": line})
+        # Plain text lines
+        elif line and (current_topic or current_subtopic):
+            entry = {"type": "text", "text": line}
+            if current_subtopic:
+                current_subtopic["content"].append(entry)
+            else:
+                current_topic["content"].append(entry)
 
     return structured_data
 
-def write_json(file_path: str, data: Dict[str, List[Dict[str, str]]]) -> None:
-    # Writes the structured data to a JSON file
-    with open(file_path, "w", encoding="utf-8") as json_file:
-        json.dump(data, json_file, indent=4, ensure_ascii=False)
-    print(f"JSON data successfully written to {file_path}")
+def save_to_downloads(data: dict, filename: str) -> None:
+    """Save JSON file to Mac Downloads folder."""
+    downloads_path = os.path.join(os.path.expanduser("~"), "Downloads")
+    filepath = os.path.join(downloads_path, filename)
+    
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+    
+    print(f"\n✅ File saved to: {filepath}")
 
 if __name__ == "__main__":
-    md_path = input("Enter the path to the Markdown file: ")
-    md_content = read_markdown_file(md_path) # Use imported function
-
-    structured_data = parse_markdown(md_content)
-
-    if structured_data["Chapters"]:
-        write_json("structured_data.json", structured_data)
-    else:
-        print("Error: No data extracted from the Markdown file!")
+    # Get input file path
+    md_file = input("Enter path to your markdown file: ").strip()
+    
+    try:
+        with open(md_file, "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        # Parse and save
+        parsed_data = parse_markdown(content)
+        save_to_downloads(parsed_data, "physics_notes.json")
+        
+    except FileNotFoundError:
+        print(f"❌ Error: File not found at {md_file}")
+    except Exception as e:
+        print(f"❌ Unexpected error: {str(e)}")
